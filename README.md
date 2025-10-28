@@ -4,7 +4,7 @@
 - 20181619 백영민 
 - 20191782 이규태
 
-## <u>Teamate</u> Project Background
+## <u>Teammate</u> Project Background
 - ### 필요성
   - OOO
   - OOO
