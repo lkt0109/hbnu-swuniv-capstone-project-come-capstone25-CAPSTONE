@@ -1,0 +1,211 @@
+import numpy as np
+import dlib
+import cv2
+import time
+import datetime
+from time import sleep
+from gpiozero import Buzzer
+
+buzzer = Buzzer(18)
+
+text_position = (10,50)
+
+
+RIGHT_EYE = list(range(36,42))
+LEFT_EYE = list(range(42,48))
+EYES = list(range(36,48))
+
+model_points = np.array([
+    (0.0, 0.0, 0.0),             # nose(30)
+    (-225.0, 170.0, -135.0),     # left eye (36)
+    (225.0, 170.0, -135.0),      # right eye (45)
+    (-150.0, -150.0, -125.0),    # left mouth (48)
+    (150.0, -150.0, -125.0),     # right mouth (54)
+    (0.0, -330.0, -65.0)         # chin (8)
+], dtype="double")
+
+
+
+frame_width = 640
+frame_height = 480
+center = (320, 240)
+camera_matrix = np.array([
+    [frame_width, 0, center[0]],
+    [0, frame_width, center[1]],
+    [0, 0, 1]
+], dtype="double")
+dist_coeffs = np.zeros((4, 1))
+
+title_name = 'Sleep Detective'
+
+face_cascade_name = './test/lib/python3.11/site-packages/cv2/data/haarcascade_frontalface_alt.xml'
+face_cascade = cv2.CascadeClassifier()
+
+if not face_cascade.load(cv2.samples.findFile(face_cascade_name)):
+	print('error cascade')
+	exit(0)
+
+
+predictor_file = './test/shape_predictor_68_face_landmarks.dat'
+predictor = dlib.shape_predictor(predictor_file)
+
+
+status = 'Awake'
+number_closed = 0.00
+min_EAR = 0.20
+closed_limit = 10
+show_frame = None
+sign = None
+color = None
+
+def getEAR(points):
+	A = np.linalg.norm(points[1] - points[5])
+	B = np.linalg.norm(points[2] - points[4])
+	C = np.linalg.norm(points[0] - points[3])
+	return (A + B) / (2.0 * C)
+
+
+def detectAndDisplay(image, time):
+	global number_closed
+	global color
+	global show_frame
+	global sign
+	global status
+
+	now_time = time
+	image = cv2.resize(image, (frame_width, frame_height))
+	show_frame = image
+	faces = face_cascade.detectMultiScale(image)
+	
+
+	if len(faces) == 0:
+		status = 'No Face Detected'
+		color = (0, 0, 255)
+		number_closed = 0
+	else:
+		for(x,y,w,h) in faces:
+			cv2.rectangle(image, (x,y), (x+w, y+h), (0, 255, 0), 2)
+			rect = dlib.rectangle(int(x), int(y), int(x+w), int(y+h))
+
+			points = np.matrix([[p.x,p.y] for p in predictor(image, rect).parts()])
+			show_parts = points[EYES]
+
+			right_eye_EAR = getEAR(points[RIGHT_EYE])
+			left_eye_EAR = getEAR(points[LEFT_EYE])
+			mean_eye_EAR = (right_eye_EAR + left_eye_EAR) / 2
+			
+			right_eye_center = np.mean(points[RIGHT_EYE], axis = 0).astype("int")
+			left_eye_center = np.mean(points[LEFT_EYE], axis = 0).astype("int")
+			
+
+
+			cv2.putText(image, "{:.2f}".format(right_eye_EAR),(right_eye_center[0,0], right_eye_center[0,1] + 20), cv2.FONT_HERSHEY_SIMPLEX,0.5,(0, 255, 0), 1)
+			cv2.putText(image, "{:.2f}".format(left_eye_EAR),(left_eye_center[0,0], left_eye_center[0,1] + 20), cv2.FONT_HERSHEY_SIMPLEX,0.5,(0,255,0), 1)
+			cv2.putText(image, now_time, text_position, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 1)
+			
+			
+		
+			image_points = np.array([
+				(points[30, 0], points[30, 1]),
+				(points[36, 0], points[36, 1]),
+				(points[45, 0], points[45, 1]),
+				(points[48, 0], points[48, 1]),
+				(points[54, 0], points[54, 1]),
+				(points[8, 0], points[8, 1])
+			], dtype="double")
+			
+			(success, rotation_vector, translation_vector) = cv2.solvePnP(
+				model_points, image_points, camera_matrix, dist_coeffs,
+				flags=cv2.SOLVEPNP_ITERATIVE
+			)
+
+			rotation_matrix, _ = cv2.Rodrigues(rotation_vector)
+	 
+			pitch = np.degrees(np.arctan2(-rotation_matrix[1, 2], rotation_matrix[1, 1]))
+			yaw = np.degrees(np.arctan2(-rotation_matrix[2, 0], np.sqrt(rotation_matrix[2, 1]**2 + rotation_matrix[2, 2]**2)))
+			roll = np.degrees(np.arctan2(rotation_matrix[0, 1], rotation_matrix[0, 0]))
+			
+	 
+			cv2.putText(image, f"Pitch: {pitch:.2f}", (20, 340), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+			cv2.putText(image, f"Yaw: {yaw:.2f}", (20, 370), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+			cv2.putText(image, f"Roll: {roll:.2f}", (20, 400), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+			
+
+			for (i, point) in enumerate(show_parts):
+				x = point[0,0]
+				y = point[0,1]
+				cv2.circle(image, (x,y), 1, (0,255,255), -1)
+
+
+			if pitch < 0 or abs(yaw) > 20:
+				color = (0,0,255)
+				status = 'sleep'
+				number_closed += 0.25
+			else:
+				if mean_eye_EAR > min_EAR:
+					color = (0,255,0)
+					status = 'Awake'
+					number_closed = number_closed - 1
+					if(number_closed < 0):
+						number_closed = 0.00
+				else:
+					color = (0,0,255)
+					status = 'sleep'
+					number_closed = number_closed + 1
+				
+			sign = 'sleep count : ' + str(number_closed) + '/'+ str(closed_limit)
+
+
+			if(number_closed > closed_limit):
+				buzzer.on()
+				text_save(now_time)
+
+			else:
+				buzzer.off()
+	cv2.putText(show_frame, status, (100,100), cv2.FONT_HERSHEY_DUPLEX,2,color,2)
+	cv2.putText(show_frame, sign, (10,frame_height-20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color,2)
+	cv2.imshow(title_name, show_frame)
+
+def text_save(time):
+	file_path = "./test/event_log.txt"
+	log_entry = f"[{time}] event occur"
+
+	try:
+		with open(file_path, "a") as f:
+			f.write(log_entry + "\n")
+
+	except FileNotFoundError:
+		print("file not found")
+
+
+
+cap = cv2.VideoCapture(-1)
+cap.set(cv2.CAP_PROP_BRIGHTNESS, 180)
+cap.set(cv2.CAP_PROP_CONTRAST, 100)
+
+time.sleep(1)
+
+if not cap.isOpened:
+	print('camera error')
+	exit(0)
+
+while cap.isOpened:
+	ret, frame = cap.read()
+
+	now = datetime.datetime.now()
+	time_string = now.strftime("%Y-%m-%d %H:%M:%S")
+
+	if not ret:
+		print('read frame error')
+		cap.release()
+		break
+
+	detectAndDisplay(frame, time_string)
+
+	if cv2.waitKey(1) & 0xFF == ord('q'):
+		break
+
+
+cap.release()
+cv2.destroyAllWindows()
